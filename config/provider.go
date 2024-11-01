@@ -6,6 +6,8 @@ package config
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"strings"
 
 	// Note(ezgidemirel): we are importing this to embed provider schema document
@@ -182,6 +184,45 @@ func getProviderSchema(s string) (*schema.Provider, error) {
 	}, nil
 }
 
+type SingletonListField struct {
+	TFName     string
+	ShortGroup string
+	TFPath     []string
+	CRDPath    []string
+}
+
+func (f SingletonListField) String() string {
+	return fmt.Sprintf("%s\t%s\t%s\t%s", f.TFName, f.ShortGroup, strings.Join(f.TFPath, "."), strings.Join(f.CRDPath, "."))
+}
+
+var singletonListFields = make([]SingletonListField, 0)
+
+// SingletonListLocator is a schema traverser for printing singleton lists fields
+// in the Terraform schema.
+type SingletonListLocator struct {
+	config.SingletonListEmbedder
+}
+
+func (l *SingletonListLocator) VisitResource(r *traverser.ResourceNode) error {
+	// this visitor only works on sets and lists with the MaxItems constraint
+	// of 1.
+	if r.Schema.Type != schema.TypeList && r.Schema.Type != schema.TypeSet {
+		return nil
+	}
+	if r.Schema.MaxItems != 1 {
+		return nil
+	}
+
+	f := SingletonListField{
+		TFName:  r.TFName,
+		TFPath:  append([]string(nil), r.TFPath...),
+		CRDPath: append([]string(nil), r.CRDPath...),
+	}
+	singletonListFields = append(singletonListFields, f)
+
+	return nil
+}
+
 // GetProvider returns provider configuration
 func GetProvider(_ context.Context, generationProvider bool) (*ujconfig.Provider, error) {
 	sdkProvider := provider.Provider()
@@ -220,6 +261,7 @@ func GetProvider(_ context.Context, generationProvider bool) (*ujconfig.Provider
 		ujconfig.WithMainTemplate(hack.MainTemplate),
 		ujconfig.WithTerraformProvider(sdkProvider),
 		ujconfig.WithSchemaTraversers(&ujconfig.SingletonListEmbedder{}),
+		ujconfig.WithSchemaTraversers(&SingletonListLocator{}),
 	)
 
 	bumpVersionsWithEmbeddedLists(pc)
@@ -276,6 +318,20 @@ func GetProvider(_ context.Context, generationProvider bool) (*ujconfig.Provider
 	}
 
 	pc.ConfigureResources()
+
+	for _, field := range singletonListFields {
+		resource, ok := pc.Resources[field.TFName]
+		if !ok {
+			// Skip Terraform resources that are not used by the provider.
+			continue
+		}
+
+		field.ShortGroup = resource.ShortGroup
+		fmt.Println(field)
+	}
+
+	os.Exit(0)
+
 	return pc, nil
 }
 
